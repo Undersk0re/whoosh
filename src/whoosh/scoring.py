@@ -600,17 +600,46 @@ class ReverseWeighting(WeightingModel):
             return 0 - self.subscorer.block_quality(matcher)
 
 
-#class PositionWeighting(WeightingModel):
-#    def __init__(self, reversed=False):
-#        self.reversed = reversed
-#
-#    def scorer(self, searcher, fieldname, text, qf=1):
-#        return PositionWeighting.PositionScorer()
-#
-#    class PositionScorer(BaseScorer):
-#        def score(self, matcher):
-#            p = min(span.pos for span in matcher.spans())
-#            if self.reversed:
-#                return p
-#            else:
-#                return 0 - p
+class BM25Extended(WeightingModel):
+    """BM25 qf extension"""
+    def __init__(self, B=0.75, K1=1.2, K3=0.5,**kwargs):
+        self.B = B
+        self.K1 = K1
+        self.K3 = K3
+        self._field_B = {}
+        for k, v in iteritems(kwargs):
+            if k.endswith("_B"):
+                fieldname = k[:-2]
+                self._field_B[fieldname] = v
+
+    def supports_block_quality(self):
+        return True
+
+    def scorer(self, searcher, fieldname, text, qf=1):
+        if not searcher.schema[fieldname].scorable:
+            return WeightScorer.for_(searcher, fieldname, text)
+        if fieldname in self._field_B:
+            B = self._field_B[fieldname]
+        else:
+            B = self.B
+        return BM25FScorerExtension(searcher, fieldname, text, B, self.K1, self.K3, qf=qf)
+
+class BM25FScorerExtension(WeightLengthScorer):
+    def __init__(self, searcher, fieldname, text, B, K1, K3 , qf=1):
+        parent = searcher.get_parent()  # Returns self if no parent
+        self.idf = parent.idf(fieldname, text)
+        self.avgfl = parent.avg_field_length(fieldname) or 1
+        self.B = B
+        self.K1 = K1
+        self.K3 = K3
+        self.qf = qf
+        self.setup(searcher, fieldname, text)
+
+    def __custom_bm25(self, idf, tf, fl, avgfl, B, K1, k3, qf):
+        return idf * ((tf * (K1 + 1)) / (tf + K1 * ((1 - B) + B * fl / avgfl))) * (((k3 + 1)*qf)/(k3 + qf))
+
+
+    def _score(self, weight, length):
+        """Lambda Lazy evaluation approach"""
+        return self.__custom_bm25(self.idf, weight, length, self.avgfl, self.B, self.K1 , self.K3, self.qf )
+
